@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import urllib.parse
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -30,7 +31,6 @@ RELEASE_WATCH_MONTH = os.environ.get("RELEASE_WATCH_MONTH", "202701")
 
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_TO = os.environ.get("LINE_USER_ID", "")
 ERROR_ALERT_AFTER = 6  # 連続失敗がこの回数に達したら1度だけ通知
 
 JST = timezone(timedelta(hours=9))
@@ -104,18 +104,23 @@ def fmt_date(d):
 
 
 def send_line(text):
-    if not (LINE_TOKEN and LINE_TO):
+    """友だち全員に一斉送信（broadcast）。無料プランは月200通（人数分カウント）"""
+    if not LINE_TOKEN:
         print("[LINE未設定] 送信内容:\n" + text)
         return
-    body = json.dumps({"to": LINE_TO, "messages": [{"type": "text", "text": text[:4900]}]}).encode()
+    body = json.dumps({"messages": [{"type": "text", "text": text[:4900]}]}).encode()
     req = urllib.request.Request(
-        "https://api.line.me/v2/bot/message/push",
+        "https://api.line.me/v2/bot/message/broadcast",
         data=body,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_TOKEN}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        print("LINE送信:", r.status)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print("LINE送信:", r.status)
+    except urllib.error.HTTPError as e:
+        # 月の送信上限超過（429）などでも状態保存は続ける
+        print("LINE送信失敗:", e.code, e.read()[:300], file=sys.stderr)
 
 
 def diff(prev_days, cur_days, published_before, cutoff):
