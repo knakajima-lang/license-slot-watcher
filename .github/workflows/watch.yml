@@ -1,0 +1,50 @@
+name: 学科試験 空き枠ウォッチ
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 約10分おき（GitHubの混雑で数分遅れることがあります）
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "テスト通知を送る"
+        type: boolean
+        default: true
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 前回の状態を復元
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: slot-state-${{ github.run_id }}
+          restore-keys: slot-state-
+
+      - name: 空き枠チェック
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          COURSE_CODE: ${{ vars.COURSE_CODE || '11' }}
+          PLACE_CODES: ${{ vars.PLACE_CODES || '270,280,250' }}
+          MONTHS: ${{ vars.MONTHS || '202611,202612,202701' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.test }}" = "true" ]; then
+            python3 monitor.py --test
+          else
+            python3 monitor.py
+          fi
+
+      - name: 状態を保存
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: slot-state-${{ github.run_id }}
