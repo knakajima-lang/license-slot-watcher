@@ -8,8 +8,10 @@
 
 標準ライブラリのみで動作します。
 """
+import html
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.error
@@ -31,6 +33,7 @@ RELEASE_WATCH_MONTH = os.environ.get("RELEASE_WATCH_MONTH", "202701")
 
 STATE_FILE = os.environ.get("STATE_FILE", "state/state.json")
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+
 ERROR_ALERT_AFTER = 6  # 連続失敗がこの回数に達したら1度だけ通知
 
 JST = timezone(timedelta(hours=9))
@@ -73,14 +76,29 @@ def fetch_month(place, month):
     return len(days) > 0, days
 
 
-def fetch_notice_flag():
-    """告知ページに『令和9年1月分以降…未公開』の文言が残っているか（補助チェック）"""
+def extract_notice_lines(html_text):
+    """告知ページの本文から『1月』と『公開/受付/予約』を含む文を抜き出す"""
+    s = re.sub(r"(?is)<(script|style)\b.*?</\1>", "", html_text)
+    s = html.unescape(re.sub(r"<[^>]+>", "\n", s))
+    out = []
+    for line in s.split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        # 「11月」「12月」は除外し、「1月」「１月」だけを対象にする
+        if 5 <= len(line) <= 300 and re.search(r"(?<![0-9０-９])[1１]月", line) \
+                and any(k in line for k in ("公開", "受付", "予約")):
+            if line not in out:
+                out.append(line)
+    return out
+
+
+def fetch_notice_lines():
+    """警視庁『学科試験の完全予約制について』ページの1月分に関する文。取得失敗時は None"""
     try:
         req = urllib.request.Request(NOTICE_URL, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
-            html = r.read().decode("utf-8", "ignore")
-        return "令和9年1月分以降" in html
-    except Exception:
+            return extract_notice_lines(r.read().decode("utf-8", "ignore"))
+    except Exception as e:
+        print("告知ページ取得失敗:", e, file=sys.stderr)
         return None
 
 
@@ -168,30 +186,37 @@ def run(test=False):
                 for d, rem in diff(pdays, days, True, cutoff):
                     opened.append((place, d, rem))
 
-    # 告知ページ（補助）
-    notice = fetch_notice_flag()
-    notice_changed = (st.get("notice_flag") is True and notice is False)
+    # 警視庁HPのお知らせ（1月分の公開日時の事前告知）
+    notice_lines = fetch_notice_lines()
+    prev_notice = st.get("notice_lines")
+    new_notice = []
+    if notice_lines is not None and prev_notice is not None:
+        new_notice = [l for l in notice_lines if l not in prev_notice]
 
     # ---- 通知文 ----
     lines = []
+    if new_notice:
+        lines.append("📢 警視庁HPに1月分の予約についてお知らせが出ました")
+        for l in new_notice[:3]:
+            lines.append(f"「{l[:150]}」")
+        lines.append(NOTICE_URL)
+    slot = []
     if new_release:
         m = int(RELEASE_WATCH_MONTH[4:])
-        lines.append(f"🆕 {m}月の学科試験 予約枠が公開されました")
+        slot.append(f"🆕 {m}月の学科試験 予約枠が公開されました")
         for place, total in new_release:
-            lines.append(f"・{PLACES.get(place, place)}：空き合計 {total}名")
-    elif notice_changed:
-        lines.append("📢 警視庁の告知ページが更新されました（1月分公開の可能性）")
-        lines.append(NOTICE_URL)
+            slot.append(f"・{PLACES.get(place, place)}：空き合計 {total}名")
     if opened:
-        if lines:
-            lines.append("")
-        lines.append("✅ 空きが出ました（キャンセル等）")
+        if slot:
+            slot.append("")
+        slot.append("✅ 空きが出ました（キャンセル等）")
         for place, d, rem in opened[:20]:
-            lines.append(f"・{PLACES.get(place, place)} {fmt_date(d)} 残り{rem}名")
+            slot.append(f"・{PLACES.get(place, place)} {fmt_date(d)} 残り{rem}名")
         if len(opened) > 20:
-            lines.append(f"…ほか{len(opened) - 20}件")
-    if lines:
-        lines += ["", "予約はこちら（早い者勝ち）", SITE_URL]
+            slot.append(f"…ほか{len(opened) - 20}件")
+    if slot:
+        slot += ["", "予約はこちら（早い者勝ち）", SITE_URL]
+        lines += ([""] if lines else []) + slot
 
     fail_count = st.get("fail_count", 0) + 1 if errors and len(errors) == len(PLACE_CODES) * len(MONTHS) else 0
     if fail_count == ERROR_ALERT_AFTER:
@@ -205,6 +230,12 @@ def run(test=False):
                 avail = sum(v for d, v in ds.items() if d >= cutoff)
                 state = "未公開" if f"{place}|{month}" not in published else f"空き合計 {avail}名"
                 summary.append(f"・{PLACES.get(place, place)} {int(month[4:])}月：{state}")
+        if notice_lines is None:
+            summary.append("・警視庁HP：取得できませんでした")
+        elif any("公開しておりません" in l for l in notice_lines):
+            summary.append("・警視庁HP：1月分の公開日はまだ告知なし（監視中）")
+        else:
+            summary.append("・警視庁HP：" + (notice_lines[0][:100] if notice_lines else "1月分の記載なし（監視中）"))
         if errors:
             summary.append("取得エラー: " + errors[0][:200])
         send_line("\n".join(summary))
@@ -216,7 +247,7 @@ def run(test=False):
     st.update({
         "days": cur,
         "published": sorted(published),
-        "notice_flag": notice if notice is not None else st.get("notice_flag"),
+        "notice_lines": notice_lines if notice_lines is not None else prev_notice,
         "fail_count": fail_count,
         "last_run": now_jst().isoformat(),
     })
