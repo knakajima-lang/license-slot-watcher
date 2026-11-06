@@ -10,6 +10,10 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+  actions: write   # 60日で自動停止されないよう、ワークフローを有効化し直すため
+
 concurrency:
   group: watch
   cancel-in-progress: false
@@ -34,12 +38,22 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           COURSE_CODE: ${{ vars.COURSE_CODE || '11' }}
           PLACE_CODES: ${{ vars.PLACE_CODES || '270,280,250' }}
-          MONTHS: ${{ vars.MONTHS || '202611,202612,202701' }}
+          MONTHS: ${{ vars.MONTHS }}   # 空なら「今月〜約3か月先」を自動で見張る
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.test }}" = "true" ]; then
             python3 monitor.py --test
           else
             python3 monitor.py
+          fi
+
+      - name: 自動停止の防止（1日1回）
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 60日間更新がないリポジトリは定期実行が止まるため、毎日0時台に有効化し直す
+          if [ "$(TZ=Asia/Tokyo date +%H)" = "00" ] && [ "$(date +%M)" -lt 10 ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/watch.yml/enable" && echo "keepalive OK"
           fi
 
       - name: 状態を保存
